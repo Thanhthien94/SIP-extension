@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Onestar SIP Caller</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <img src="icons/icon48.png" alt="Onestar SIP" class="logo">
+      <h1>Onestar SIP Caller</h1>
+    </div>
+
+    <!-- Loader -->
+    <div id="loader" class="loader">
+      <div class="spinner"></div>
+    </div>
+
+    <!-- Trạng thái chưa đăng nhập -->
+    <div id="login-form" class="section" style="display: none;">
+      <h2>Đăng nhập SIP</h2>
+      <form id="auth-form">
+        <div class="form-group">
+          <label for="username">Tên đăng nhập</label>
+          <input type="text" id="username" placeholder="Nhập tên đăng nhập" required>
+        </div>
+        <div class="form-group">
+          <label for="password">Mật khẩu</label>
+          <input type="password" id="password" placeholder="Nhập mật khẩu" required>
+        </div>
+        <button type="submit" id="login-button" class="btn btn-primary">Đăng nhập</button>
+      </form>
+      <div id="login-error" class="error-message"></div>
+    </div>
+
+    <!-- Trạng thái đã đăng nhập -->
+    <div id="authenticated" class="section" style="display: none;">
+      <div class="user-info">
+        <span id="user-display-name">Xin chào, <span id="display-name"></span></span>
+        <span id="extension-display">SIP: <strong id="extension"></strong></span>
+      </div>
+      
+      <div class="call-section">
+        <h2>Gọi điện</h2>
+        <div class="form-group">
+          <label for="phone-number">Số điện thoại</label>
+          <input type="text" id="phone-number" placeholder="Nhập số điện thoại" pattern="[0-9\+\-\(\)\s]+" required>
+        </div>
+        <button id="call-button" class="btn btn-success">Gọi ngay</button>
+      </div>
+
+      <div id="call-status" class="call-status">
+        <div id="status-idle" class="status-box">
+          <span class="status-dot idle"></span> Sẵn sàng
+        </div>
+        <div id="status-ringing" class="status-box" style="display: none;">
+          <span class="status-dot ringing"></span> Đang gọi...
+          <button id="hangup-button" class="btn btn-danger btn-small">Kết thúc</button>
+        </div>
+        <div id="status-answered" class="status-box" style="display: none;">
+          <span class="status-dot answered"></span> Đang trong cuộc gọi
+          <button id="hangup-button-2" class="btn btn-danger btn-small">Kết thúc</button>
+        </div>
+      </div>
+
+      <div class="footer">
+        <button id="logout-button" class="btn btn-text">Đăng xuất</button>
+      </div>
+    </div>
+
+    <!-- Hướng dẫn sử dụng -->
+    <div id="instructions" class="section" style="display: none;">
+      <h2>Hướng dẫn sử dụng</h2>
+      <ol>
+        <li>Bôi đen số điện thoại trên trang web bất kỳ</li>
+        <li>Click chuột phải vào số đã bôi đen</li>
+        <li>Chọn "Gọi số 'XXX' qua SIP"</li>
+      </ol>
+      <p class="tip">Mẹo: Bạn cũng có thể gọi trực tiếp từ popup này bằng cách nhập số và nhấn "Gọi ngay".</p>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
