@@ -1,0 +1,53 @@
+/* Onestar SIP Caller - Content CSS */
+
+.onestar-sip-call-button {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    overflow: hidden;
+    background-color: white;
+    transition: opacity 0.2s ease;
+    z-index: 999999;
+  }
+  
+  .onestar-call-btn {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    background-color: #4a6cf7;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+    white-space: nowrap;
+    min-width: 120px;
+  }
+  
+  .onestar-call-btn:hover {
+    background-color: #3a5be0;
+  }
+  
+  .onestar-call-btn img {
+    margin-right: 8px;
+    width: 16px;
+    height: 16px;
+  }
+  
+  /* Animation */
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  
+  .onestar-sip-call-button {
+    animation: fadeIn 0.2s ease;
+  }
+  
+  /* Đảm bảo CTA không bị ẩn bởi z-index của các trang web khác */
+  .onestar-sip-call-button {
+    z-index: 2147483647 !important;
+  }

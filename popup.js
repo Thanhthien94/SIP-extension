@@ -87,4 +87,139 @@ async function logout() {
     showLoader(true);
     await chrome.runtime.sendMessage({ action: 'logout' });
     isAuthenticated = false;
-    sip
+    sipConfig = null;
+    callState = 'idle';
+    updateUI();
+  } catch (error) {
+    console.error('Lỗi đăng xuất:', error);
+  } finally {
+    showLoader(false);
+  }
+}
+
+// Thực hiện cuộc gọi
+async function makeCall(phoneNumber) {
+  try {
+    showLoader(true);
+    
+    if (!phoneNumber || phoneNumber.trim() === '') {
+      alert('Vui lòng nhập số điện thoại');
+      return;
+    }
+    
+    const response = await chrome.runtime.sendMessage({
+      action: 'makeCall',
+      phoneNumber
+    });
+    
+    if (!response.success) {
+      alert(response.error || 'Không thể thực hiện cuộc gọi');
+    }
+  } catch (error) {
+    console.error('Lỗi khi gọi điện:', error);
+    alert('Đã xảy ra lỗi khi thực hiện cuộc gọi');
+  } finally {
+    showLoader(false);
+  }
+}
+
+// Kết thúc cuộc gọi
+async function endCall() {
+  try {
+    showLoader(true);
+    await chrome.runtime.sendMessage({ action: 'endCall' });
+  } catch (error) {
+    console.error('Lỗi khi kết thúc cuộc gọi:', error);
+  } finally {
+    showLoader(false);
+  }
+}
+
+// Cập nhật giao diện dựa trên trạng thái hiện tại
+function updateUI() {
+  if (isAuthenticated) {
+    loginForm.style.display = 'none';
+    authenticatedSection.style.display = 'block';
+    instructions.style.display = 'block';
+    
+    // Hiển thị thông tin người dùng
+    if (sipConfig) {
+      userDisplayName.textContent = sipConfig.displayName || 'Người dùng';
+      extensionDisplay.textContent = sipConfig.extension || 'N/A';
+    }
+    
+    // Cập nhật trạng thái cuộc gọi
+    updateCallStatus();
+  } else {
+    loginForm.style.display = 'block';
+    authenticatedSection.style.display = 'none';
+    instructions.style.display = 'none';
+  }
+}
+
+// Cập nhật UI dựa trên trạng thái cuộc gọi
+function updateCallStatus() {
+  switch (callState) {
+    case 'idle':
+      statusIdle.style.display = 'flex';
+      statusRinging.style.display = 'none';
+      statusAnswered.style.display = 'none';
+      break;
+    case 'ringing':
+      statusIdle.style.display = 'none';
+      statusRinging.style.display = 'flex';
+      statusAnswered.style.display = 'none';
+      break;
+    case 'answered':
+      statusIdle.style.display = 'none';
+      statusRinging.style.display = 'none';
+      statusAnswered.style.display = 'flex';
+      break;
+    default:
+      statusIdle.style.display = 'flex';
+      statusRinging.style.display = 'none';
+      statusAnswered.style.display = 'none';
+  }
+}
+
+// Đăng ký các event listeners
+function initEventListeners() {
+  // Form đăng nhập
+  authForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = usernameInput.value;
+    const password = passwordInput.value;
+    await login(username, password);
+  });
+  
+  // Nút gọi điện
+  callButton.addEventListener('click', () => {
+    const phoneNumber = phoneInput.value;
+    makeCall(phoneNumber);
+  });
+  
+  // Nút kết thúc cuộc gọi
+  hangupButton.addEventListener('click', endCall);
+  hangupButton2.addEventListener('click', endCall);
+  
+  // Nút đăng xuất
+  logoutButton.addEventListener('click', logout);
+  
+  // Lắng nghe cập nhật trạng thái từ background script
+  chrome.runtime.onMessage.addListener((request) => {
+    if (request.action === 'statusUpdate') {
+      isAuthenticated = request.status.isAuthenticated;
+      callState = request.status.callState;
+      sipConfig = request.status.sipConfig;
+      updateUI();
+    }
+  });
+}
+
+// Hiển thị hoặc ẩn loader
+function showLoader(show) {
+  loader.style.display = show ? 'flex' : 'none';
+}
+
+// Khởi tạo popup
+checkAuthStatus();
