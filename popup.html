@@ -52,17 +52,28 @@
       </div>
 
       <div id="call-status" class="call-status">
+        <!-- Trạng thái sẵn sàng -->
         <div id="status-idle" class="status-box">
           <span class="status-dot idle"></span> Sẵn sàng
         </div>
+        
+        <!-- Hiển thị lỗi cuộc gọi -->
+        <div id="call-error" class="status-box error" style="display: none;"></div>
+        
+        <!-- Trạng thái đang gọi -->
         <div id="status-ringing" class="status-box" style="display: none;">
           <span class="status-dot ringing"></span> Đang gọi...
           <button id="hangup-button" class="btn btn-danger btn-small">Kết thúc</button>
         </div>
+        
+        <!-- Trạng thái đã kết nối -->
         <div id="status-answered" class="status-box" style="display: none;">
           <span class="status-dot answered"></span> Đang trong cuộc gọi
           <button id="hangup-button-2" class="btn btn-danger btn-small">Kết thúc</button>
         </div>
+        
+        <!-- Hiển thị thời gian cuộc gọi -->
+        <div id="call-duration" class="call-duration" style="display: none;"></div>
       </div>
 
       <div class="footer">

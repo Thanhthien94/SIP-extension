@@ -2,12 +2,26 @@
  * Onestar SIP Caller - Popup Script
  * 
  * Quản lý giao diện người dùng popup và tương tác với background script
+ * Cập nhật dựa trên dự án SIP desktop
  */
 
 // Trạng thái của popup
 let isAuthenticated = false;
 let callState = 'idle';
+let callDuration = '';
 let sipConfig = null;
+let lastErrorCode = null;
+let lastErrorReason = '';
+let isLoading = false;
+
+// Hằng số
+const CALL_STATES = {
+  IDLE: 'idle',
+  CONNECTING: 'connecting',
+  RINGING: 'ringing',
+  ANSWERED: 'answered',
+  HANGUP: 'hangup'
+};
 
 // DOM Elements
 const loader = document.getElementById('loader');
@@ -20,6 +34,7 @@ const extensionDisplay = document.getElementById('extension');
 const statusIdle = document.getElementById('status-idle');
 const statusRinging = document.getElementById('status-ringing');
 const statusAnswered = document.getElementById('status-answered');
+const callDurationElement = document.getElementById('call-duration');
 
 // Form elements
 const authForm = document.getElementById('auth-form');
@@ -45,6 +60,9 @@ async function checkAuthStatus() {
     const response = await chrome.runtime.sendMessage({ action: 'getStatus' });
     isAuthenticated = response.isAuthenticated;
     callState = response.callState;
+    callDuration = response.callDuration || '';
+    lastErrorCode = response.lastErrorCode;
+    lastErrorReason = response.lastErrorReason;
     sipConfig = response.sipConfig;
     updateUI();
   } catch (error) {
@@ -58,6 +76,7 @@ async function checkAuthStatus() {
 async function login(username, password) {
   try {
     showLoader(true);
+    isLoading = true;
     loginError.textContent = '';
     
     const response = await chrome.runtime.sendMessage({
@@ -78,6 +97,7 @@ async function login(username, password) {
     loginError.textContent = error.message || 'Đã xảy ra lỗi khi đăng nhập';
   } finally {
     showLoader(false);
+    isLoading = false;
   }
 }
 
@@ -89,6 +109,9 @@ async function logout() {
     isAuthenticated = false;
     sipConfig = null;
     callState = 'idle';
+    callDuration = '';
+    lastErrorCode = null;
+    lastErrorReason = '';
     updateUI();
   } catch (error) {
     console.error('Lỗi đăng xuất:', error);
@@ -104,6 +127,7 @@ async function makeCall(phoneNumber) {
     
     if (!phoneNumber || phoneNumber.trim() === '') {
       alert('Vui lòng nhập số điện thoại');
+      showLoader(false);
       return;
     }
     
@@ -159,22 +183,69 @@ function updateUI() {
 
 // Cập nhật UI dựa trên trạng thái cuộc gọi
 function updateCallStatus() {
+  // Hiển thị thời gian cuộc gọi nếu có
+  if (callDuration && callState === CALL_STATES.ANSWERED) {
+    callDurationElement.textContent = callDuration;
+    callDurationElement.style.display = 'block';
+  } else {
+    callDurationElement.style.display = 'none';
+  }
+  
   switch (callState) {
-    case 'idle':
+    case CALL_STATES.IDLE:
       statusIdle.style.display = 'flex';
       statusRinging.style.display = 'none';
       statusAnswered.style.display = 'none';
+      
+      // Hiển thị lỗi cuộc gọi cuối nếu có
+      if (lastErrorCode && lastErrorReason) {
+        const errorElement = document.getElementById('call-error');
+        if (errorElement) {
+          errorElement.textContent = `Cuộc gọi cuối: ${lastErrorReason} (${lastErrorCode})`;
+          errorElement.style.display = 'block';
+          
+          // Tự động ẩn sau 10 giây
+          setTimeout(() => {
+            errorElement.style.display = 'none';
+          }, 10000);
+          
+          // Reset sau khi hiển thị
+          lastErrorCode = null;
+          lastErrorReason = '';
+        }
+      }
       break;
-    case 'ringing':
+      
+    case CALL_STATES.CONNECTING:
       statusIdle.style.display = 'none';
       statusRinging.style.display = 'flex';
       statusAnswered.style.display = 'none';
+      
+      // Thay đổi text khi đang kết nối
+      const statusText = document.querySelector('#status-ringing span:not(.status-dot)');
+      if (statusText) {
+        statusText.textContent = 'Đang kết nối...';
+      }
       break;
-    case 'answered':
+      
+    case CALL_STATES.RINGING:
+      statusIdle.style.display = 'none';
+      statusRinging.style.display = 'flex';
+      statusAnswered.style.display = 'none';
+      
+      // Thay đổi text khi đang đổ chuông
+      const ringingText = document.querySelector('#status-ringing span:not(.status-dot)');
+      if (ringingText) {
+        ringingText.textContent = 'Đang gọi...';
+      }
+      break;
+      
+    case CALL_STATES.ANSWERED:
       statusIdle.style.display = 'none';
       statusRinging.style.display = 'none';
       statusAnswered.style.display = 'flex';
       break;
+      
     default:
       statusIdle.style.display = 'flex';
       statusRinging.style.display = 'none';
@@ -187,6 +258,10 @@ function initEventListeners() {
   // Form đăng nhập
   authForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+    
+    // Tránh đăng nhập trùng lặp
+    if (isLoading) return;
+    
     const username = usernameInput.value;
     const password = passwordInput.value;
     await login(username, password);
@@ -196,6 +271,15 @@ function initEventListeners() {
   callButton.addEventListener('click', () => {
     const phoneNumber = phoneInput.value;
     makeCall(phoneNumber);
+  });
+  
+  // Cho phép nhấn Enter để gọi
+  phoneInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const phoneNumber = phoneInput.value;
+      makeCall(phoneNumber);
+    }
   });
   
   // Nút kết thúc cuộc gọi
@@ -210,6 +294,9 @@ function initEventListeners() {
     if (request.action === 'statusUpdate') {
       isAuthenticated = request.status.isAuthenticated;
       callState = request.status.callState;
+      callDuration = request.status.callDuration || '';
+      lastErrorCode = request.status.lastErrorCode;
+      lastErrorReason = request.status.lastErrorReason;
       sipConfig = request.status.sipConfig;
       updateUI();
     }

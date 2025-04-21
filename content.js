@@ -2,16 +2,21 @@
  * Onestar SIP Caller - Content Script
  * 
  * Bắt sự kiện bôi đen số điện thoại và hiển thị menu gọi điện
+ * Cập nhật dựa trên dự án SIP desktop
  */
 
 // Trạng thái kết nối và đăng nhập
 let isAuthenticated = false;
 let callState = 'idle';
+let callDuration = '';
+let lastErrorCode = null;
+let lastErrorReason = '';
 let sipConfig = null;
 
 // Hằng số
 const CALL_STATES = {
   IDLE: 'idle',
+  CONNECTING: 'connecting',
   RINGING: 'ringing',
   ANSWERED: 'answered',
   HANGUP: 'hangup'
@@ -37,6 +42,11 @@ function cleanPhoneNumber(text) {
 function showCallButton(selectedText, x, y) {
   // Nếu chưa đăng nhập hoặc không phải số điện thoại, không hiện nút
   if (!isAuthenticated || !isPhoneNumber(selectedText)) {
+    return;
+  }
+  
+  // Nếu đang có cuộc gọi, không hiện nút
+  if (callState !== CALL_STATES.IDLE) {
     return;
   }
   
@@ -93,9 +103,19 @@ function makeCall(phoneNumber) {
     return;
   }
   
+  // Kiểm tra trạng thái cuộc gọi hiện tại
+  if (callState !== CALL_STATES.IDLE) {
+    alert('Đang có cuộc gọi đang diễn ra');
+    return;
+  }
+  
   chrome.runtime.sendMessage({
     action: 'makeCall',
     phoneNumber: cleanNumber
+  }, (response) => {
+    if (response && !response.success && response.error) {
+      alert(`Không thể thực hiện cuộc gọi: ${response.error}`);
+    }
   });
 }
 
@@ -135,7 +155,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'statusUpdate') {
     isAuthenticated = request.status.isAuthenticated;
     callState = request.status.callState;
+    callDuration = request.status.callDuration || '';
+    lastErrorCode = request.status.lastErrorCode;
+    lastErrorReason = request.status.lastErrorReason;
     sipConfig = request.status.sipConfig;
+    
+    // Ẩn nút gọi nếu đang trong cuộc gọi
+    if (callState !== CALL_STATES.IDLE) {
+      hideCallButton();
+    }
   }
   
   return false;
@@ -146,6 +174,9 @@ chrome.runtime.sendMessage({ action: 'getStatus' }, (response) => {
   if (response) {
     isAuthenticated = response.isAuthenticated;
     callState = response.callState;
+    callDuration = response.callDuration || '';
+    lastErrorCode = response.lastErrorCode;
+    lastErrorReason = response.lastErrorReason;
     sipConfig = response.sipConfig;
   }
 });

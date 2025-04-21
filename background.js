@@ -2,6 +2,7 @@
  * Onestar SIP Caller - Background Script
  * 
  * Quản lý kết nối SIP và xử lý các yêu cầu cuộc gọi
+ * Cập nhật dựa trên dự án SIP desktop
  */
 
 // Cấu hình SIP
@@ -9,8 +10,27 @@ let sipConfig = null;
 let isAuthenticated = false;
 let ua = null; // User Agent JsSIP
 let activeSession = null;
-let callState = 'idle'; // idle, ringing, answered, hangup
+let callState = 'idle'; // idle, connecting, ringing, answered, hangup
+let callStartTime = null;
+let callDuration = '';
+let callDurationInterval = null;
 let remoteAudio = null; // Element audio cho cuộc gọi
+let lastErrorCode = null; // Mã SIP của lỗi cuối cùng
+let lastErrorReason = ''; // Lý do lỗi cuối cùng
+
+// Biến theo dõi trạng thái kết nối
+let sipInitCount = 0;
+let lastInitTime = 0;
+let reconnectTimeout = null;
+
+// Biến theo dõi các lần thử gọi
+let callRetryCount = 0;
+let callRetryTimeout = null;
+
+// Cấu hình retry
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RETRY_DELAYS = [2000, 4000, 8000]; // Exponential backoff (2s, 4s, 8s)
+const CALL_RETRY_DELAYS = [1500, 3000, 5000]; // Thời gian thử lại cuộc gọi (ms)
 
 // Các hằng số từ dự án gốc
 const AUTH_URL = 'https://office.onestar.vn/auth';
@@ -19,9 +39,31 @@ const SIP_WS_URL = 'wss://sip.socket.onestar.vn/ws';
 const SIP_SERVER_HOST = '103.27.238.195';
 const CALL_STATES = {
   IDLE: 'idle',
+  CONNECTING: 'connecting',
   RINGING: 'ringing',
   ANSWERED: 'answered',
   HANGUP: 'hangup'
+};
+
+// Ánh xạ mã SIP -> thông báo 
+const SIP_CODE_MESSAGES = {
+  100: 'Đang thử kết nối',
+  180: 'Đang đổ chuông',
+  183: 'Đang tiến hành',
+  200: 'Thành công',
+  400: 'Yêu cầu không hợp lệ',
+  401: 'Cần xác thực',
+  403: 'Bị từ chối',
+  404: 'Không tìm thấy',
+  408: 'Hết thời gian chờ',
+  480: 'Tạm thời không liên lạc được',
+  486: 'Máy bận',
+  487: 'Cuộc gọi đã hủy',
+  488: 'Không chấp nhận',
+  500: 'Lỗi máy chủ',
+  503: 'Dịch vụ không khả dụng',
+  600: 'Bận ở mọi nơi',
+  603: 'Từ chối'
 };
 
 // Tải thư viện JsSIP từ CDN khi extension được khởi chạy
@@ -86,6 +128,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({
         isAuthenticated,
         callState,
+        callDuration,
+        lastErrorCode,
+        lastErrorReason,
         sipConfig: isAuthenticated ? {
           extension: sipConfig?.extension,
           displayName: sipConfig?.displayName
@@ -211,7 +256,7 @@ async function fetchSIPConfig() {
       };
       
       // Kiểm tra tính đầy đủ của cấu hình
-      if (!sipConfig.extension || !sipConfig.password || !sipConfig.sipServer || !sipConfig.wsHost) {
+      if (!validateSIPConfig(sipConfig)) {
         throw new Error('Cấu hình SIP không đầy đủ');
       }
       
@@ -230,9 +275,68 @@ async function fetchSIPConfig() {
   }
 }
 
+// Kiểm tra tính hợp lệ của cấu hình SIP
+function validateSIPConfig(config) {
+  if (!config) return false;
+  
+  // Kiểm tra các trường bắt buộc
+  if (!config.extension || config.extension.trim() === '') {
+    console.error('Thiếu extension trong cấu hình SIP');
+    return false;
+  }
+  
+  if (!config.password || config.password.trim() === '') {
+    console.error('Thiếu password trong cấu hình SIP');
+    return false;
+  }
+  
+  if (!config.sipServer || config.sipServer.trim() === '') {
+    console.error('Thiếu sipServer trong cấu hình SIP');
+    return false;
+  }
+  
+  if (!config.wsHost || config.wsHost.trim() === '') {
+    console.error('Thiếu wsHost trong cấu hình SIP');
+    return false;
+  }
+  
+  // Kiểm tra định dạng của extension (thường là số)
+  if (!/^\d+$/.test(config.extension)) {
+    console.warn('Extension không phải định dạng số');
+    // Không fail ở đây vì có thể có những trường hợp đặc biệt
+  }
+  
+  // Kiểm tra định dạng wsHost
+  if (!config.wsHost.startsWith('ws://') && !config.wsHost.startsWith('wss://')) {
+    console.error('wsHost phải bắt đầu bằng ws:// hoặc wss://');
+    return false;
+  }
+  
+  return true;
+}
+
 // Khởi tạo kết nối SIP với JsSIP
 async function initSIPConnection() {
   try {
+    // Kiểm tra loop
+    const now = Date.now();
+    if (lastInitTime && now - lastInitTime < 2000) {
+      console.log('Throttling SIP init calls - gọi quá nhanh');
+      return false;
+    }
+    lastInitTime = now;
+    
+    // Đếm số lần khởi tạo để tránh loop vô hạn
+    sipInitCount = (sipInitCount || 0) + 1;
+    if (sipInitCount > MAX_RECONNECT_ATTEMPTS) {
+      console.error('Phát hiện loop, dừng việc khởi tạo SIP');
+      // Reset sau 10 giây
+      setTimeout(() => {
+        sipInitCount = 0;
+      }, 10000);
+      return false;
+    }
+    
     // Tải thư viện JsSIP
     await loadJsSIP();
     
@@ -250,9 +354,11 @@ async function initSIPConnection() {
       password: sipConfig.password,
       display_name: sipConfig.displayName,
       register: true,
-      register_expires: 300, // Đăng ký hết hạn sau 5 phút
-      session_timers: false,
-      user_agent: 'Onestar SIP Caller'
+      register_expires: 600, // Tăng thời gian hết hạn thành 10 phút
+      session_timers: true,
+      user_agent: 'Onestar SIP Caller',
+      hack_ip_in_contact: true, // Giúp xử lý một số vấn đề NAT/firewall
+      no_answer_timeout: 45 // 45 giây không trả lời sẽ tự hủy
     };
     
     // Tạo đối tượng audio cho cuộc gọi
@@ -264,10 +370,16 @@ async function initSIPConnection() {
     // Khởi tạo User Agent
     ua = new window.JsSIP.UA(config);
     
-    // Đăng ký các sự kiện
+    // Đăng ký các sự kiện với xử lý lỗi tốt hơn
     ua.on('registered', () => {
       console.log('Đã đăng ký SIP thành công');
       callState = CALL_STATES.IDLE;
+      // Reset counter khi đăng ký thành công
+      sipInitCount = 0;
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
       broadcastStatus();
     });
     
@@ -277,8 +389,46 @@ async function initSIPConnection() {
     
     ua.on('registrationFailed', (e) => {
       console.error('Đăng ký SIP thất bại:', e);
+      
+      // Tự động thử lại khi đăng ký thất bại
+      if (sipInitCount <= MAX_RECONNECT_ATTEMPTS) {
+        const delay = RETRY_DELAYS[sipInitCount - 1] || 5000;
+        console.log(`Sẽ thử lại sau ${delay/1000}s (lần ${sipInitCount}/${MAX_RECONNECT_ATTEMPTS})`);
+        
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout);
+        }
+        
+        reconnectTimeout = setTimeout(() => {
+          console.log('Đang thử kết nối lại...');
+          initSIPConnection();
+        }, delay);
+      }
     });
     
+    ua.on('connected', () => {
+      console.log('WebSocket đã kết nối');
+    });
+    
+    ua.on('disconnected', () => {
+      console.log('WebSocket đã ngắt kết nối');
+      
+      // Thử kết nối lại khi bị ngắt
+      if (sipInitCount <= MAX_RECONNECT_ATTEMPTS) {
+        const delay = RETRY_DELAYS[sipInitCount - 1] || 5000;
+        
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout);
+        }
+        
+        reconnectTimeout = setTimeout(() => {
+          console.log('Đang thử kết nối lại sau khi bị ngắt...');
+          initSIPConnection();
+        }, delay);
+      }
+    });
+    
+    // Xử lý cuộc gọi tới tốt hơn
     ua.on('newRTCSession', (data) => {
       const session = data.session;
       
@@ -290,14 +440,8 @@ async function initSIPConnection() {
         callState = CALL_STATES.RINGING;
         broadcastStatus();
         
-        // Đăng ký các sự kiện cho phiên
+        // Đăng ký các sự kiện cho phiên với cải tiến từ dự án desktop
         registerSessionEvents(session);
-        
-        // Tự động trả lời cuộc gọi đến (tuỳ chọn)
-        // session.answer({
-        //   mediaConstraints: { audio: true, video: false },
-        //   pcConfig: { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] }
-        // });
       }
     });
     
@@ -308,22 +452,78 @@ async function initSIPConnection() {
     return true;
   } catch (error) {
     console.error('Lỗi khi khởi tạo kết nối SIP:', error);
+    
+    // Thử lại sau lỗi nếu chưa vượt quá số lần tối đa
+    if (sipInitCount <= MAX_RECONNECT_ATTEMPTS) {
+      const delay = RETRY_DELAYS[sipInitCount - 1] || 5000;
+      console.log(`Sẽ thử lại sau ${delay/1000}s (lần ${sipInitCount}/${MAX_RECONNECT_ATTEMPTS})`);
+      
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+      
+      reconnectTimeout = setTimeout(() => {
+        console.log('Đang thử kết nối lại sau lỗi...');
+        initSIPConnection();
+      }, delay);
+    }
+    
     return false;
   }
 }
 
-// Đăng ký các sự kiện cho phiên cuộc gọi
+// Đăng ký các sự kiện cho phiên cuộc gọi với xử lý early media tốt hơn
 function registerSessionEvents(session) {
-  session.on('progress', () => {
+  // Theo dõi xem đã thiết lập early media chưa
+  let hasEarlyMedia = false;
+
+  session.on('progress', (e) => {
     console.log('Cuộc gọi đang kết nối...');
     callState = CALL_STATES.RINGING;
     broadcastStatus();
+    
+    // Kiểm tra early media trong progress event
+    try {
+      if (e.originator === 'remote' && e.response) {
+        const contentType = e.response.getHeader ? e.response.getHeader('Content-Type') : null;
+        const hasBody = !!e.response.body;
+        
+        console.log('Progress response info:', {
+          hasContentType: !!contentType,
+          contentType,
+          hasBody
+        });
+        
+        // Nếu phản hồi chứa SDP, có thể là early media
+        if ((contentType === 'application/sdp' || contentType?.includes('sdp')) && hasBody) {
+          console.log('SDP được phát hiện trong progress event - có thể có early media');
+          hasEarlyMedia = true;
+        }
+      }
+    } catch (error) {
+      console.error('Lỗi khi xử lý early media tiềm năng:', error);
+    }
   });
   
   session.on('accepted', () => {
     console.log('Cuộc gọi được chấp nhận');
     callState = CALL_STATES.ANSWERED;
     broadcastStatus();
+    
+    // Bắt đầu đếm thời gian cuộc gọi
+    callStartTime = new Date();
+    if (callDurationInterval) {
+      clearInterval(callDurationInterval);
+    }
+    
+    callDurationInterval = setInterval(() => {
+      const now = new Date();
+      const durationSeconds = Math.floor((now - callStartTime) / 1000);
+      const minutes = Math.floor(durationSeconds / 60);
+      const seconds = durationSeconds % 60;
+      callDuration = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+      broadcastStatus();
+    }, 1000);
   });
   
   session.on('confirmed', () => {
@@ -334,34 +534,116 @@ function registerSessionEvents(session) {
   
   session.on('ended', () => {
     console.log('Cuộc gọi kết thúc');
-    activeSession = null;
-    callState = CALL_STATES.IDLE;
-    broadcastStatus();
+    cleanupCall();
   });
   
   session.on('failed', (data) => {
     console.error('Cuộc gọi thất bại:', data.cause);
-    activeSession = null;
-    callState = CALL_STATES.IDLE;
-    broadcastStatus();
+    
+    // Xác định mã SIP từ dữ liệu lỗi
+    let sipCode = null;
+    
+    try {
+      if (data.message && data.message.status_code) {
+        sipCode = data.message.status_code;
+      } else if (data.cause === 'CANCELED' || data.cause === 'Canceled') {
+        sipCode = 487; // Request Terminated
+      } else if (data.cause === 'NO_ANSWER') {
+        sipCode = 408; // Request Timeout
+      } else if (data.cause === 'BUSY') {
+        sipCode = 486; // Busy Here
+      }
+      
+      // Lưu lại mã SIP để hiển thị cho người dùng
+      lastErrorCode = sipCode;
+      lastErrorReason = getSIPCodeMessage(sipCode);
+    } catch (error) {
+      console.error('Lỗi khi xử lý mã SIP:', error);
+    }
+    
+    cleanupCall();
   });
   
-  // Xử lý luồng media
+  // Xử lý luồng media với cải tiến từ dự án desktop
   session.on('peerconnection', (e) => {
     console.log('Thiết lập kết nối ngang hàng');
     const peerconnection = e.peerconnection;
     
     peerconnection.ontrack = (trackEvent) => {
-      const remoteStream = trackEvent.streams[0];
+      console.log('Track được thêm vào:', trackEvent.track.kind);
       
-      if (remoteAudio) {
-        remoteAudio.srcObject = remoteStream;
+      if (trackEvent.track.kind === 'audio') {
+        console.log('Audio track được thêm vào peerConnection');
+        
+        if (!remoteAudio) {
+          remoteAudio = new Audio();
+          remoteAudio.autoplay = true;
+        }
+        
+        // Tạo stream mới từ track và thêm vào audio element
+        try {
+          const stream = new MediaStream();
+          stream.addTrack(trackEvent.track);
+          
+          remoteAudio.srcObject = stream;
+          
+          // Xử lý vấn đề autoplay policy
+          const playPromise = remoteAudio.play();
+          if (playPromise !== undefined) {
+            playPromise.catch(error => {
+              console.error('Lỗi khi phát audio:', error);
+              
+              // Đặt lắng nghe sự kiện click để thử phát lại
+              const resumeAudio = () => {
+                if (!remoteAudio) return;
+                
+                remoteAudio.play()
+                  .then(() => console.log('Audio đã tiếp tục sau tương tác người dùng'))
+                  .catch(e => console.error('Vẫn không phát được audio:', e));
+              };
+              
+              document.addEventListener('click', resumeAudio, { once: true });
+            });
+          }
+        } catch (error) {
+          console.error('Lỗi khi thiết lập audio stream:', error);
+        }
+      }
+    };
+    
+    // Theo dõi trạng thái ICE connection
+    peerconnection.oniceconnectionstatechange = () => {
+      console.log('Trạng thái kết nối ICE thay đổi:', peerconnection.iceConnectionState);
+      
+      // Xử lý các tình huống mất kết nối
+      if (peerconnection.iceConnectionState === 'failed' || 
+          peerconnection.iceConnectionState === 'disconnected') {
+        console.warn('Kết nối ICE không thành công hoặc bị ngắt');
       }
     };
   });
 }
 
-// Hàm thực hiện cuộc gọi với JsSIP
+// Hàm dọn dẹp sau cuộc gọi
+function cleanupCall() {
+  activeSession = null;
+  callState = CALL_STATES.IDLE;
+  
+  if (callDurationInterval) {
+    clearInterval(callDurationInterval);
+    callDurationInterval = null;
+  }
+  
+  callDuration = '';
+  broadcastStatus();
+}
+
+// Hàm lấy message từ mã SIP
+function getSIPCodeMessage(code) {
+  return SIP_CODE_MESSAGES[code] || 'Lỗi không xác định';
+}
+
+// Hàm thực hiện cuộc gọi với retry và xử lý lỗi tốt hơn
 async function makeCall(phoneNumber) {
   try {
     // Kiểm tra đã đăng nhập chưa
@@ -381,49 +663,106 @@ async function makeCall(phoneNumber) {
       throw new Error('Đang có cuộc gọi đang diễn ra');
     }
     
-    // Kiểm tra xem User Agent đã được khởi tạo chưa
-    if (!ua) {
-      await initSIPConnection();
-      if (!ua) {
-        throw new Error('Không thể khởi tạo kết nối SIP');
-      }
-    }
+    // Reset trạng thái retry
+    callRetryCount = 0;
     
-    // Kiểm tra trạng thái đăng ký
-    if (!ua.isRegistered()) {
-      throw new Error('Chưa đăng ký với máy chủ SIP');
-    }
-    
-    // Thực hiện cuộc gọi
-    const callOptions = {
-      mediaConstraints: { audio: true, video: false },
-      pcConfig: {
-        iceServers: [
-          { urls: ['stun:stun.l.google.com:19302'] }
-        ]
-      }
-    };
-    
-    console.log(`Đang gọi điện tới số: ${cleanNumber}`);
-    
-    // Tạo địa chỉ SIP URI
-    const sipUri = `sip:${cleanNumber}@${sipConfig.sipServer}`;
-    
-    // Bắt đầu cuộc gọi
-    activeSession = ua.call(sipUri, callOptions);
-    callState = CALL_STATES.RINGING;
-    broadcastStatus();
-    
-    // Đăng ký các sự kiện
-    registerSessionEvents(activeSession);
-    
-    return { success: true, phoneNumber: cleanNumber };
+    // Thực hiện cuộc gọi với retry logic
+    return await attemptCall(cleanNumber);
   } catch (error) {
     console.error('Lỗi khi thực hiện cuộc gọi:', error);
     callState = CALL_STATES.IDLE;
     broadcastStatus();
     return { success: false, error: error.message };
   }
+}
+
+// Hàm thực hiện cuộc gọi với retry
+async function attemptCall(cleanNumber) {
+  // Kiểm tra xem User Agent đã được khởi tạo chưa
+  if (!ua) {
+    console.log('User Agent chưa được khởi tạo, đang khởi tạo...');
+    await initSIPConnection();
+    
+    // Đợi một chút để kết nối hoàn tất
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    if (!ua) {
+      throw new Error('Không thể khởi tạo kết nối SIP');
+    }
+  }
+  
+  // Kiểm tra trạng thái đăng ký
+  if (!ua.isRegistered()) {
+    console.log('UA chưa đăng ký, đang thử đăng ký lại...');
+    
+    // Thử đăng ký lại
+    try {
+      ua.register();
+      
+      // Đợi đăng ký hoàn tất (tối đa 5 giây)
+      for (let i = 0; i < 5; i++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (ua.isRegistered()) {
+          console.log('Đã đăng ký SIP thành công sau khi thử lại');
+          break;
+        }
+      }
+    } catch (registerError) {
+      console.error('Lỗi khi đăng ký lại SIP:', registerError);
+    }
+    
+    // Kiểm tra lại sau khi thử đăng ký
+    if (!ua.isRegistered()) {
+      // Nếu vẫn chưa đăng ký được, thử lần nữa sau một khoảng thời gian
+      if (callRetryCount < CALL_RETRY_DELAYS.length) {
+        const delay = CALL_RETRY_DELAYS[callRetryCount];
+        callRetryCount++;
+        
+        console.log(`Chưa thể kết nối SIP, thử lại lần ${callRetryCount} sau ${delay/1000}s`);
+        
+        // Thông báo đang trong trạng thái đang kết nối
+        callState = CALL_STATES.CONNECTING;
+        broadcastStatus();
+        
+        // Lên lịch thử lại
+        return new Promise((resolve) => {
+          callRetryTimeout = setTimeout(() => {
+            attemptCall(cleanNumber).then(resolve);
+          }, delay);
+        });
+      } else {
+        throw new Error('Không thể kết nối đến máy chủ SIP sau nhiều lần thử');
+      }
+    }
+  }
+  
+  // Thực hiện cuộc gọi
+  const callOptions = {
+    mediaConstraints: { audio: true, video: false },
+    pcConfig: {
+      iceServers: [
+        { urls: ['stun:stun.l.google.com:19302'] }
+      ]
+    },
+    // Cho phép early media và tự động trả lời khi có tiến trình
+    earlyMedia: true,
+    answerOnProgress: true
+  };
+  
+  console.log(`Đang gọi điện tới số: ${cleanNumber}`);
+  
+  // Tạo địa chỉ SIP URI
+  const sipUri = `sip:${cleanNumber}@${sipConfig.sipServer}`;
+  
+  // Bắt đầu cuộc gọi
+  activeSession = ua.call(sipUri, callOptions);
+  callState = CALL_STATES.RINGING;
+  broadcastStatus();
+  
+  // Đăng ký các sự kiện
+  registerSessionEvents(activeSession);
+  
+  return { success: true, phoneNumber: cleanNumber };
 }
 
 // Hàm kết thúc cuộc gọi
@@ -444,24 +783,31 @@ async function endCall() {
     
     // Cập nhật trạng thái
     setTimeout(() => {
-      callState = CALL_STATES.IDLE;
-      activeSession = null;
-      broadcastStatus();
+      cleanupCall();
     }, 1000);
     
     broadcastStatus();
     return { success: true };
   } catch (error) {
     console.error('Lỗi khi kết thúc cuộc gọi:', error);
-    callState = CALL_STATES.IDLE;
-    activeSession = null;
-    broadcastStatus();
+    cleanupCall();
     return { success: false, error: error.message };
   }
 }
 
 // Hàm đăng xuất
 function logout() {
+  // Hủy bỏ các timeout đang chạy
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+  
+  if (callRetryTimeout) {
+    clearTimeout(callRetryTimeout);
+    callRetryTimeout = null;
+  }
+  
   // Hủy đăng ký SIP nếu đang kết nối
   if (ua && ua.isRegistered()) {
     ua.unregister();
@@ -472,7 +818,10 @@ function logout() {
   sipConfig = null;
   callState = CALL_STATES.IDLE;
   activeSession = null;
+  lastErrorCode = null;
+  lastErrorReason = '';
   ua = null;
+  sipInitCount = 0;
   
   // Xóa dữ liệu từ storage
   chrome.storage.local.clear();
@@ -486,6 +835,9 @@ function broadcastStatus() {
   const status = {
     isAuthenticated,
     callState,
+    callDuration,
+    lastErrorCode,
+    lastErrorReason,
     sipConfig: isAuthenticated ? {
       extension: sipConfig?.extension,
       displayName: sipConfig?.displayName
@@ -505,16 +857,41 @@ function broadcastStatus() {
 async function restoreState() {
   try {
     const data = await chrome.storage.local.get([
-      'TOKEN', 'SIP_CONFIG'
+      'TOKEN', 'SIP_CONFIG', 'USERNAME', 'FIRSTNAME', 'LASTNAME', 'SIPID'
     ]);
     
     if (data.TOKEN && data.SIP_CONFIG) {
-      isAuthenticated = true;
-      sipConfig = data.SIP_CONFIG;
-      console.log('Đã khôi phục trạng thái đăng nhập');
+      // Kiểm tra tính đầy đủ của cấu hình SIP
+      const storedConfig = data.SIP_CONFIG;
       
-      // Khởi tạo kết nối SIP nếu đã đăng nhập
-      await initSIPConnection();
+      if (!validateSIPConfig(storedConfig)) {
+        console.warn('Cấu hình SIP không đầy đủ, cần lấy lại');
+        
+        // Thử lấy lại cấu hình SIP nếu có SIPID
+        if (data.SIPID && data.TOKEN) {
+          const success = await fetchSIPConfig();
+          if (success) {
+            console.log('Đã khôi phục cấu hình SIP thành công');
+            isAuthenticated = true;
+            
+            // Khởi tạo kết nối SIP với delay
+            setTimeout(() => {
+              initSIPConnection();
+            }, 1500);
+          } else {
+            console.error('Không thể lấy cấu hình SIP');
+          }
+        }
+      } else {
+        isAuthenticated = true;
+        sipConfig = storedConfig;
+        console.log('Đã khôi phục trạng thái đăng nhập');
+        
+        // Khởi tạo kết nối SIP nếu đã đăng nhập
+        setTimeout(() => {
+          initSIPConnection();
+        }, 1500);
+      }
     }
   } catch (error) {
     console.error('Lỗi khi khôi phục trạng thái:', error);
